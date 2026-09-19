@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from browser_harness.admin import ensure_daemon
-from browser_harness.helpers import cdp
+from browser_harness.helpers import NAME, cdp
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text(encoding="utf-8")
@@ -39,6 +39,11 @@ class Browser:
     def target_id(self):
         """Stable identity of the owned CDP target within this browser connection."""
         return self.target
+
+    @property
+    def connection_name(self):
+        """Browser Harness connection name used by this process."""
+        return NAME
 
     def evaluate(self, expression):
         response = self.call("Runtime.evaluate", expression=expression, returnByValue=True)
