@@ -23,7 +23,7 @@ page fingerprint、観測済みaction、対象のactionable状態を再検証し
 最初のblockでは、現在pageと上限付きの直近historyだけをOpenAI-compatible Recovery modelへ送ります。
 `RECOVERY_MODEL_API_KEY` / `RECOVERY_MODEL_BASE_URL` / `RECOVERY_MODEL` のいずれかを使う場合は3項目を一式で必須とし、Recovery専用設定が一切ない場合だけ `TEXT_MODEL_*` 一式へfallbackします。返せるのはdiagnosis、
 revised subgoal、上限付きavoid hintだけです。operationと観測済みtargetは常にJevが選びます。
-同等blockの2回目、またはtotal recovery budget消費時は `handoff_required` を返し、Jev mutationを停止します。
+同等blockの2回目、またはtotal recovery budget消費時は `handoff_required` を返し、Jev mutationを停止します。Jevのmodel-call budget到達も例外のtool errorにはせず、blockedとして同じ上限付きRecovery経路へ入れます。
 
 handoffはBrowser Harness CDP `target_id` を主identityとし、実際のBrowser Harness connection名、URL、title、fingerprint、
 block/recovery countを含みます。raw WebSocket URLは公開せず、fallback browser backendも選定しません。
