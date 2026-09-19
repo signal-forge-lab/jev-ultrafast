@@ -91,6 +91,13 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
+## MCP backend
+
+Run `uv run jev-mcp` to expose the six bounded browser tools on the loopback
+Streamable HTTP endpoint `http://127.0.0.1:18766/mcp`. It supports caller and
+internal text modes, bounded Recovery LLM guidance, and destination-neutral
+handoff metadata. See [the MCP guide](docs/mcp.md) ([日本語](docs/mcp.ja.md)).
+
 ## Why it moves
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.
