@@ -133,3 +133,64 @@ def test_resume_is_forwarded_once_under_the_session_lock(backend):
 
     assert result["status"] == "done"
     agent.resume_text.assert_called_once_with("opaque", "query")
+
+
+@pytest.mark.parametrize("url", ["", "file:///private.txt", "javascript:alert(1)", "https:///missing-host"])
+def test_start_rejects_non_web_urls_before_creating_a_browser(backend, url):
+    server, registry = backend
+
+    with pytest.raises(ValueError, match="HTTP or HTTPS"):
+        server.jev_browser_start(url, "Click Go")
+
+    assert registry.count == 0
+    assert not FakeAgent.instances
+
+
+def test_start_rejects_unbounded_goal_before_creating_a_browser(backend):
+    server, registry = backend
+
+    with pytest.raises(ValueError, match="goal"):
+        server.jev_browser_start("https://example.test", "x" * 20_001)
+
+    assert registry.count == 0
+    assert not FakeAgent.instances
+
+
+def test_session_limit_fails_closed_without_opening_an_extra_target(backend, monkeypatch):
+    server, registry = backend
+    monkeypatch.setattr(server, "MAX_SESSIONS", 1)
+    server.jev_browser_start("https://example.test/one", "Click One")
+
+    with pytest.raises(ValueError, match="session limit"):
+        server.jev_browser_start("https://example.test/two", "Click Two")
+
+    assert registry.count == 1
+    assert len(FakeAgent.instances) == 1
+
+
+def test_failed_close_remains_owned_for_a_bounded_retry(backend):
+    server, registry = backend
+    started = server.jev_browser_start("https://example.test", "Click Go")
+    agent = FakeAgent.instances[0]
+    agent.close = Mock(side_effect=[RuntimeError("close failed"), None])
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        server.jev_browser_close(started["session_id"])
+    assert registry.count == 1
+
+    result = server.jev_browser_close(started["session_id"])
+    assert result["closed"]
+    assert registry.count == 0
+
+
+def test_failed_initial_snapshot_closes_unpublished_target(backend, monkeypatch):
+    server, registry = backend
+    original_snapshot = FakeAgent.snapshot
+    monkeypatch.setattr(FakeAgent, "snapshot", Mock(side_effect=RuntimeError("snapshot failed")))
+
+    with pytest.raises(RuntimeError, match="snapshot failed"):
+        server.jev_browser_start("https://example.test", "Click Go")
+
+    assert registry.count == 0
+    assert FakeAgent.instances[0].closed
+    monkeypatch.setattr(FakeAgent, "snapshot", original_snapshot)

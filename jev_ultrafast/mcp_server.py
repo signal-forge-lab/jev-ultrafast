@@ -6,6 +6,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Literal
+from urllib.parse import urlsplit
 
 from mcp.server.mcpserver import MCPServer
 
@@ -13,12 +14,14 @@ from .agent import Agent
 from .browser import StalePage
 
 TERMINAL_STATUSES = {"done", "blocked", "need_text", "handoff_required", "recovery_unavailable"}
+MAX_SESSIONS = 32
 
 
 @dataclass
 class OwnedSession:
     agent: Agent
     lock: threading.RLock = field(default_factory=threading.RLock)
+    closed: bool = False
 
 
 class SessionRegistry:
@@ -26,6 +29,7 @@ class SessionRegistry:
 
     def __init__(self):
         self._sessions = {}
+        self._starting = 0
         self._lock = threading.RLock()
 
     @property
@@ -34,11 +38,28 @@ class SessionRegistry:
             return len(self._sessions)
 
     def start(self, url, goal, text_mode):
-        agent = Agent(url, goal, text_mode=text_mode, recovery=True, screenshots=False)
+        with self._lock:
+            if len(self._sessions) + self._starting >= MAX_SESSIONS:
+                raise ValueError(f"The {MAX_SESSIONS}-session limit is reached; no browser target was opened.")
+            self._starting += 1
+        agent = None
+        try:
+            agent = Agent(url, goal, text_mode=text_mode, recovery=True, screenshots=False)
+            snapshot = agent.snapshot()
+        except Exception:
+            if agent is not None:
+                try:
+                    agent.close()
+                except Exception:
+                    pass
+            with self._lock:
+                self._starting -= 1
+            raise
         session_id = uuid.uuid4().hex
         with self._lock:
+            self._starting -= 1
             self._sessions[session_id] = OwnedSession(agent)
-        return session_id, agent.snapshot()
+        return session_id, snapshot
 
     def get(self, session_id):
         with self._lock:
@@ -49,20 +70,27 @@ class SessionRegistry:
 
     def close(self, session_id):
         with self._lock:
-            session = self._sessions.pop(session_id, None)
+            session = self._sessions.get(session_id)
         if session is None:
             return False
         with session.lock:
+            if session.closed:
+                return False
             session.agent.close()
+            session.closed = True
+        with self._lock:
+            if self._sessions.get(session_id) is session:
+                self._sessions.pop(session_id)
         return True
 
     def close_all(self):
         with self._lock:
-            sessions = list(self._sessions.values())
-            self._sessions.clear()
-        for session in sessions:
-            with session.lock:
-                session.agent.close()
+            session_ids = list(self._sessions)
+        for session_id in session_ids:
+            try:
+                self.close(session_id)
+            except Exception:
+                continue
 
 
 SESSIONS = SessionRegistry()
@@ -78,6 +106,8 @@ mcp = MCPServer(
 def _with_session(session_id, operation):
     session = SESSIONS.get(session_id)
     with session.lock:
+        if session.closed:
+            raise ValueError("Session is closed; no browser operation was attempted.")
         return {"session_id": session_id, **operation(session.agent)}
 
 
@@ -88,6 +118,12 @@ def jev_browser_start(
     text_mode: Literal["caller", "internal"] = "caller",
 ) -> dict:
     """Start one owned browser target for a natural-language goal."""
+    parsed = urlsplit(url)
+    if len(url) > 2048 or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("url must be an HTTP or HTTPS URL with a host and at most 2048 characters")
+    goal = goal.strip()
+    if not goal or len(goal) > 20_000:
+        raise ValueError("goal must contain between 1 and 20000 characters")
     session_id, snapshot = SESSIONS.start(url, goal, text_mode)
     return {"session_id": session_id, **snapshot}
 
