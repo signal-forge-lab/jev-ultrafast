@@ -166,7 +166,7 @@ def runner():
     a.pending_text = None
     p = page()
     a.state = {
-        "browser": Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p)),
+        "browser": Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p), target_id="target-test"),
         "page": p,
         "decision": decision(),
         "goal": "Find a book",
@@ -460,3 +460,106 @@ def test_recovery_helper_uses_provider_neutral_openai_compatible_config(monkeypa
     assert result["revised_subgoal"] == "Use a different visible control."
     assert post.call_args.args[0] == "https://provider.test/v1/chat/completions"
     assert post.call_args.args[2]["model"] == "reasoner"
+
+
+def terminal_decision(choice):
+    return {
+        "choice": choice,
+        "operation": choice,
+        "target": None,
+        "confidence": 1.0,
+        "probabilities": {choice: 1.0},
+        "latency_ms": 1,
+        "usage": {},
+    }
+
+
+def test_e2e_click_then_done_uses_jev_only(runner, monkeypatch):
+    runner.state["decision"] = None
+    choices = [decision("e3"), terminal_decision("DONE")]
+    monkeypatch.setattr(loop, "choose", Mock(side_effect=choices))
+
+    results = list(runner.run())
+
+    assert results[-1]["status"] == "done"
+    assert runner.state["browser"].act.call_count == 1
+
+
+def test_e2e_caller_text_resume_then_done(runner, monkeypatch):
+    runner.text_mode = "caller"
+    runner.state["decision"] = None
+    monkeypatch.setattr(loop, "choose", Mock(side_effect=[decision(), terminal_decision("DONE")]))
+
+    request = runner.step()
+    assert request["status"] == "need_text"
+    runner.resume_text(request["resume_token"], "book")
+    result = runner.step()
+
+    assert result["status"] == "done"
+    assert runner.state["history"][0]["text"] == "book"
+    runner.state["browser"].act.assert_called_once()
+
+
+def test_e2e_internal_text_helper_then_done(runner, monkeypatch):
+    runner.state["decision"] = None
+    monkeypatch.setattr(loop, "choose", Mock(side_effect=[decision(), terminal_decision("DONE")]))
+    helper = Mock(return_value=("book", {"model": "test", "latency_ms": 1, "usage": {}}))
+    monkeypatch.setattr(loop, "field_text", helper)
+
+    results = list(runner.run())
+
+    assert results[-1]["status"] == "done"
+    helper.assert_called_once()
+    assert runner.state["history"][0]["text_helper"] == "test"
+
+
+def test_e2e_first_block_recovers_then_succeeds(runner, monkeypatch):
+    runner.recovery_enabled = True
+    runner.state["decision"] = None
+    monkeypatch.setattr(loop, "choose", Mock(side_effect=[terminal_decision("BLOCKED"), terminal_decision("DONE")]))
+    recovery = Mock(return_value={"diagnosis": "Try another route", "revised_subgoal": "Open search", "avoid": []})
+    monkeypatch.setattr(loop, "recovery_guidance", recovery)
+
+    results = list(runner.run())
+
+    assert results[-1]["status"] == "done"
+    assert recovery.call_count == 1
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_e2e_equivalent_second_block_requires_handoff(runner, monkeypatch):
+    runner.recovery_enabled = True
+    runner.state["decision"] = None
+    monkeypatch.setattr(
+        loop,
+        "choose",
+        Mock(side_effect=[terminal_decision("BLOCKED"), terminal_decision("BLOCKED")]),
+    )
+    monkeypatch.setattr(
+        loop,
+        "recovery_guidance",
+        Mock(return_value={"diagnosis": "blocked", "revised_subgoal": "Try again", "avoid": []}),
+    )
+
+    results = list(runner.run())
+
+    assert results[-1]["status"] == "handoff_required"
+    assert results[-1]["handoff"]["target_id"] == "target-test"
+    assert results[-1]["handoff"]["browser_connection"] == {
+        "kind": "browser-harness-cdp",
+        "name": "default",
+    }
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_duplicate_urls_use_target_id_as_handoff_identity(runner):
+    signature = runner._block_signature()
+    first = runner._require_handoff("repeated_block", signature, 2)["handoff"]
+
+    runner.state["status"] = "blocked"
+    runner.state["handoff"] = None
+    runner.state["browser"].target_id = "target-other"
+    second = runner._require_handoff("repeated_block", signature, 2)["handoff"]
+
+    assert first["url"] == second["url"]
+    assert first["target_id"] != second["target_id"]
