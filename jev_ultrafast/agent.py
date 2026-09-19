@@ -85,6 +85,8 @@ class Agent:
         if name == "tick":
             try:
                 self.command("predict", {})
+                if state["status"] == "blocked":
+                    return self.snapshot()
                 return self.command("act", {"fingerprint": state["page"]["fingerprint"]})
             except StalePage:
                 state["decision"] = None
@@ -103,7 +105,9 @@ class Agent:
             if state["status"] in {"done", "blocked", "need_text", "handoff_required", "recovery_unavailable"}:
                 raise ValueError("This run has stopped. Start a fresh demo.")
             if len(state["decisions"]) >= MAX_STEPS * 2:
-                raise ValueError("Reached the demo's model-call budget")
+                state["status"] = "blocked"
+                state["block_reason"] = "model_call_budget"
+                return self.snapshot()
             state["decision"] = choose(state["page"], state["goal"], state["history"])
             state["decisions"].append(
                 {
@@ -268,8 +272,20 @@ class Agent:
                 "fingerprint": page["fingerprint"],
                 "guards": page.get("guards", {}),
             },
-            "history": state["history"][-6:],
-            "decisions": state["decisions"][-3:],
+            "history": [
+                {
+                    k: item.get(k)
+                    for k in ("action", "kind", "operation", "target", "page_changed", "url", "confidence")
+                }
+                for item in state["history"][-6:]
+            ],
+            "decisions": [
+                {
+                    k: item.get(k)
+                    for k in ("operation", "target", "confidence", "target_confidence", "fingerprint", "elapsed_ms")
+                }
+                for item in state["decisions"][-3:]
+            ],
             "block_reason": state.get("block_reason") or "blocked",
         }
 
@@ -280,7 +296,7 @@ class Agent:
             "required": True,
             "reason": reason,
             "browser_backend": None,
-            "browser_connection": {"kind": "browser-harness-cdp", "name": "default"},
+            "browser_connection": {"kind": "browser-harness-cdp", "name": state["browser"].connection_name},
             "target_id": state["browser"].target_id,
             "url": page["url"],
             "title": page["title"],
