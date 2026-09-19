@@ -23,14 +23,15 @@ target immediately before its single mutation attempt. `text_mode="internal"`
 preserves the existing `TEXT_MODEL_*` helper path.
 
 On the first block, recovery sends only the current page and bounded recent
-history to an OpenAI-compatible model configured by `RECOVERY_MODEL_*`, with
-fallback to `TEXT_MODEL_*`. It can return only diagnosis, a revised subgoal,
+history to an OpenAI-compatible model. A complete `RECOVERY_MODEL_API_KEY` /
+`RECOVERY_MODEL_BASE_URL` / `RECOVERY_MODEL` bundle is used when any recovery-specific
+setting is present; otherwise the complete `TEXT_MODEL_*` provider configuration is used. It can return only diagnosis, a revised subgoal,
 and bounded avoid hints. Jev still chooses every operation and observed
 target. An equivalent second block, or exhaustion of the total recovery
 budget, returns `handoff_required` and stops Jev mutations.
 
-The handoff identifies the tab by Browser Harness CDP `target_id`, plus a
-connection identity, URL, title, fingerprint, and block/recovery counts. It
+The handoff identifies the tab by Browser Harness CDP `target_id`, plus the actual
+Browser Harness connection name, URL, title, fingerprint, and block/recovery counts. It
 does not expose a raw WebSocket URL or select a fallback browser backend.
 
 Inject credentials through process environment variables. Do not store them
