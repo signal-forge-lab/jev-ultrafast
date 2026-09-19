@@ -161,6 +161,8 @@ def test_missing_text_credential_stops_before_guessing(monkeypatch):
 def runner():
     a = loop.Agent.__new__(loop.Agent)
     a.screenshots = False
+    a.text_mode = "internal"
+    a.recovery_enabled = False
     a.pending_text = None
     p = page()
     a.state = {
@@ -174,6 +176,13 @@ def runner():
         "started_at": time.perf_counter(),
         "record": False,
         "text_calls": [],
+        "base_goal": "Find a book",
+        "plan": ["Find a book"],
+        "recoveries": [],
+        "block_counts": {},
+        "recovery_attempts": 0,
+        "handoff": None,
+        "block_reason": None,
     }
     return a
 
@@ -318,3 +327,136 @@ def test_navigation_during_prediction_reobserves_without_action(runner):
     assert runner.state["status"] == "ready"
     assert runner.state["decision"] is None
     runner.state["browser"].act.assert_not_called()
+
+
+def test_caller_text_mode_pauses_without_calling_internal_helper(runner, monkeypatch):
+    runner.text_mode = "caller"
+    helper = Mock(side_effect=AssertionError("caller mode must not generate text"))
+    monkeypatch.setattr(loop, "field_text", helper)
+
+    result = runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+
+    assert result["status"] == "need_text"
+    assert result["field"] == {"label": "Search", "role": "textbox", "current_value": ""}
+    assert result["context"]["goal"] == "Find a book"
+    assert result["resume_token"]
+    helper.assert_not_called()
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_caller_text_resume_executes_once_and_consumes_token(runner):
+    runner.text_mode = "caller"
+    request = runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+
+    result = runner.resume_text(request["resume_token"], "book")
+
+    assert result["status"] == "ready"
+    runner.state["browser"].act.assert_called_once()
+    assert runner.state["history"][-1]["text"] == "book"
+    with pytest.raises(ValueError, match="resume token"):
+        runner.resume_text(request["resume_token"], "book")
+    runner.state["browser"].act.assert_called_once()
+
+
+def test_stale_caller_text_resume_fails_before_mutation(runner):
+    runner.text_mode = "caller"
+    runner.state["browser"].fresh.side_effect = [True, False]
+    request = runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+
+    with pytest.raises(StalePage, match="resume"):
+        runner.resume_text(request["resume_token"], "book")
+
+    runner.state["browser"].act.assert_not_called()
+    assert runner.pending_text is None
+    assert runner.state["status"] == "ready"
+
+
+def test_internal_text_mode_preserves_helper_path(runner, monkeypatch):
+    helper = Mock(return_value=("book", {"model": "test", "latency_ms": 1, "usage": {}}))
+    monkeypatch.setattr(loop, "field_text", helper)
+
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+
+    helper.assert_called_once()
+    runner.state["browser"].act.assert_called_once()
+
+
+def test_recovery_revises_goal_then_equivalent_second_block_requires_handoff(runner, monkeypatch):
+    runner.recovery_enabled = True
+    runner.state["status"] = "blocked"
+    runner.state["block_reason"] = "model_blocked"
+    recovery = Mock(return_value={
+        "diagnosis": "The current route has no useful control.",
+        "revised_subgoal": "Open the search form first.",
+        "avoid": ["Do not wait on the unchanged page."],
+    })
+    monkeypatch.setattr(loop, "recovery_guidance", recovery)
+
+    first = runner.recover()
+    assert first["status"] == "ready"
+    assert runner.state["recovery_attempts"] == 1
+    assert "Open the search form first." in runner.state["goal"]
+
+    runner.state["status"] = "blocked"
+    runner.state["block_reason"] = "model_blocked"
+    second = runner.recover()
+    assert second["status"] == "handoff_required"
+    assert second["handoff"]["reason"] == "repeated_block"
+    assert second["handoff"]["target_id"] == runner.state["browser"].target_id
+    assert second["handoff"]["block_count"] == 2
+    assert second["handoff"]["recovery_attempts"] == 1
+    assert recovery.call_count == 1
+
+
+def test_total_recovery_budget_stops_different_blocks(runner, monkeypatch):
+    runner.recovery_enabled = True
+    recovery = Mock(return_value={"diagnosis": "blocked", "revised_subgoal": "Try another route", "avoid": []})
+    monkeypatch.setattr(loop, "recovery_guidance", recovery)
+
+    for index in range(loop.MAX_TOTAL_RECOVERIES):
+        runner.state["page"]["fingerprint"] = f"fingerprint-{index}"
+        runner.state["status"] = "blocked"
+        runner.state["block_reason"] = f"block-{index}"
+        assert runner.recover()["status"] == "ready"
+
+    runner.state["page"]["fingerprint"] = "fingerprint-exhausted"
+    runner.state["status"] = "blocked"
+    runner.state["block_reason"] = "another-block"
+    result = runner.recover()
+    assert result["status"] == "handoff_required"
+    assert result["handoff"]["reason"] == "recovery_budget_exhausted"
+    assert recovery.call_count == loop.MAX_TOTAL_RECOVERIES
+
+
+def test_recovery_unavailable_stops_explicitly(runner, monkeypatch):
+    runner.recovery_enabled = True
+    runner.state["status"] = "blocked"
+    runner.state["block_reason"] = "model_blocked"
+    monkeypatch.setattr(loop, "recovery_guidance", Mock(side_effect=ValueError("missing recovery credential")))
+
+    result = runner.recover()
+
+    assert result["status"] == "recovery_unavailable"
+    assert result["recovery_error"] == "missing recovery credential"
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_recovery_helper_uses_provider_neutral_openai_compatible_config(monkeypatch):
+    monkeypatch.setenv("RECOVERY_MODEL_API_KEY", "test")
+    monkeypatch.setenv("RECOVERY_MODEL_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("RECOVERY_MODEL", "reasoner")
+    post = Mock(return_value={
+        "choices": [{"message": {"content": json.dumps({
+            "diagnosis": "The page did not change.",
+            "revised_subgoal": "Use a different visible control.",
+            "avoid": ["Repeating the prior wait"],
+        })}}],
+        "usage": {"total_tokens": 12},
+    })
+    monkeypatch.setattr(model, "post_json", post)
+
+    result = model.recovery_guidance({"page": {"url": "https://example.test"}})
+
+    assert result["revised_subgoal"] == "Use a different visible control."
+    assert post.call_args.args[0] == "https://provider.test/v1/chat/completions"
+    assert post.call_args.args[2]["model"] == "reasoner"

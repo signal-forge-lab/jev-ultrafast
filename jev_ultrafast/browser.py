@@ -35,6 +35,11 @@ class Browser:
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
 
+    @property
+    def target_id(self):
+        """Stable identity of the owned CDP target within this browser connection."""
+        return self.target
+
     def evaluate(self, expression):
         response = self.call("Runtime.evaluate", expression=expression, returnByValue=True)
         if response.get("exceptionDetails"):

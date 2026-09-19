@@ -7,7 +7,7 @@ import time
 
 import httpx
 
-from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
+from .questions import NEXT_ACTION, RECOVERY_GUIDANCE, TARGET, TEXT_VALUE
 
 CLIENT = httpx.Client(http2=True, timeout=25)
 
@@ -192,6 +192,60 @@ def field_text(context):
     except (ValueError, KeyError, TypeError):
         raise ValueError("Text helper returned no valid field value; nothing typed.") from None
     return value, {
+        "model": model,
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "usage": result.get("usage", {}),
+    }
+
+
+def recovery_guidance(packet):
+    key = os.environ.get("RECOVERY_MODEL_API_KEY") or os.environ.get("TEXT_MODEL_API_KEY")
+    if not key:
+        raise ValueError("Recovery needs RECOVERY_MODEL_API_KEY or TEXT_MODEL_API_KEY; browser automation stopped.")
+    base = os.environ.get("RECOVERY_MODEL_BASE_URL") or os.environ.get(
+        "TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1"
+    )
+    model = os.environ.get("RECOVERY_MODEL") or os.environ.get("TEXT_MODEL", "deepseek-chat")
+    started = time.perf_counter()
+    result = post_json(
+        base.rstrip("/") + "/chat/completions",
+        key,
+        {
+            "model": model,
+            "max_tokens": 1024,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": RECOVERY_GUIDANCE},
+                {"role": "user", "content": json.dumps(packet)},
+            ],
+        },
+    )
+    try:
+        output = json.loads(result["choices"][0]["message"]["content"])
+        diagnosis = output["diagnosis"]
+        revised = output["revised_subgoal"]
+        avoid = output["avoid"]
+        forbidden = ("selector", "xpath", "javascript", "document.", "queryselector", "coordinate")
+        values = [diagnosis, revised, *avoid]
+        valid = (
+            set(output) == {"diagnosis", "revised_subgoal", "avoid"}
+            and isinstance(diagnosis, str)
+            and 0 < len(diagnosis.strip()) <= 1000
+            and isinstance(revised, str)
+            and 0 < len(revised.strip()) <= 1000
+            and isinstance(avoid, list)
+            and len(avoid) <= 5
+            and all(isinstance(item, str) and 0 < len(item.strip()) <= 200 for item in avoid)
+            and not any(token in value.lower() for value in values for token in forbidden)
+        )
+        if not valid:
+            raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        raise ValueError("Recovery helper returned invalid guidance; browser automation stopped.") from None
+    return {
+        "diagnosis": diagnosis.strip(),
+        "revised_subgoal": revised.strip(),
+        "avoid": [item.strip() for item in avoid],
         "model": model,
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "usage": result.get("usage", {}),
