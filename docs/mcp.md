@@ -28,7 +28,7 @@ history to an OpenAI-compatible model. A complete `RECOVERY_MODEL_API_KEY` /
 setting is present; otherwise the complete `TEXT_MODEL_*` provider configuration is used. It can return only diagnosis, a revised subgoal,
 and bounded avoid hints. Jev still chooses every operation and observed
 target. An equivalent second block, or exhaustion of the total recovery
-budget, returns `handoff_required` and stops Jev mutations.
+budget, returns `handoff_required` and stops Jev mutations. Exhausting the Jev model-call budget is treated as a blocked condition and enters the same bounded recovery path instead of surfacing as an unstructured tool error.
 
 The handoff identifies the tab by Browser Harness CDP `target_id`, plus the actual
 Browser Harness connection name, URL, title, fingerprint, and block/recovery counts. It
