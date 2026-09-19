@@ -166,7 +166,12 @@ def runner():
     a.pending_text = None
     p = page()
     a.state = {
-        "browser": Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p), target_id="target-test"),
+        "browser": Mock(
+            fresh=Mock(return_value=True),
+            observe=Mock(return_value=p),
+            target_id="target-test",
+            connection_name="default",
+        ),
         "page": p,
         "decision": decision(),
         "goal": "Find a book",
@@ -441,6 +446,44 @@ def test_recovery_unavailable_stops_explicitly(runner, monkeypatch):
     runner.state["browser"].act.assert_not_called()
 
 
+def test_recovery_partial_override_fails_before_sending_text_credentials(monkeypatch):
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "text-provider-secret")
+    monkeypatch.setenv("TEXT_MODEL_BASE_URL", "https://text-provider.test/v1")
+    monkeypatch.setenv("TEXT_MODEL", "text-model")
+    monkeypatch.setenv("RECOVERY_MODEL_BASE_URL", "https://other-provider.test/v1")
+    monkeypatch.delenv("RECOVERY_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("RECOVERY_MODEL", raising=False)
+    post = Mock()
+    monkeypatch.setattr(model, "post_json", post)
+
+    with pytest.raises(ValueError, match="configuration is incomplete"):
+        model.recovery_guidance({"current_page": {"url": "https://example.test"}})
+
+    post.assert_not_called()
+
+
+def test_recovery_text_fallback_uses_one_complete_provider_bundle(monkeypatch):
+    for name in ("RECOVERY_MODEL_API_KEY", "RECOVERY_MODEL_BASE_URL", "RECOVERY_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "text-secret")
+    monkeypatch.setenv("TEXT_MODEL_BASE_URL", "https://text-provider.test/v1")
+    monkeypatch.setenv("TEXT_MODEL", "text-model")
+    post = Mock(return_value={
+        "choices": [{"message": {"content": json.dumps({
+            "diagnosis": "The page did not change.",
+            "revised_subgoal": "Use another visible path.",
+            "avoid": [],
+        })}}],
+    })
+    monkeypatch.setattr(model, "post_json", post)
+
+    model.recovery_guidance({"current_page": {"url": "https://example.test"}})
+
+    assert post.call_args.args[0] == "https://text-provider.test/v1/chat/completions"
+    assert post.call_args.args[1] == "text-secret"
+    assert post.call_args.args[2]["model"] == "text-model"
+
+
 def test_recovery_helper_uses_provider_neutral_openai_compatible_config(monkeypatch):
     monkeypatch.setenv("RECOVERY_MODEL_API_KEY", "test")
     monkeypatch.setenv("RECOVERY_MODEL_BASE_URL", "https://provider.test/v1")
@@ -550,6 +593,68 @@ def test_e2e_equivalent_second_block_requires_handoff(runner, monkeypatch):
         "name": "default",
     }
     runner.state["browser"].act.assert_not_called()
+
+
+def test_model_call_budget_enters_blocked_recovery_path_without_mutation(runner, monkeypatch):
+    runner.state["decision"] = None
+    runner.state["decisions"] = [{} for _ in range(loop.MAX_STEPS * 2)]
+    choose = Mock(side_effect=AssertionError("budget exhaustion must stop before another Jev call"))
+    monkeypatch.setattr(loop, "choose", choose)
+
+    result = runner.step()
+
+    assert result["status"] == "blocked"
+    assert result["block_reason"] == "model_call_budget"
+    choose.assert_not_called()
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_handoff_uses_actual_browser_harness_connection_name(runner):
+    runner.state["browser"].connection_name = "recovery-profile"
+    signature = runner._block_signature()
+
+    handoff = runner._require_handoff("repeated_block", signature, 2)["handoff"]
+
+    assert handoff["browser_connection"] == {
+        "kind": "browser-harness-cdp",
+        "name": "recovery-profile",
+    }
+
+
+def test_recovery_packet_projects_decisions_without_raw_requests(runner):
+    runner.state["history"].append({
+        "action": "Go",
+        "kind": "click",
+        "operation": "CLICK",
+        "target": "2",
+        "page_changed": False,
+        "url": "https://example.test/",
+        "confidence": 0.9,
+        "usage": {"private": "omit"},
+        "text": "omit",
+    })
+    runner.state["decisions"].append({
+        "operation": "CLICK",
+        "target": "2",
+        "confidence": 0.9,
+        "target_confidence": 0.8,
+        "fingerprint": "fp",
+        "elapsed_ms": 12,
+        "request": {"state": {"page": {"text": "duplicate payload"}}},
+        "raw_answers": {"operation": "omit"},
+        "usage": {"omit": True},
+    })
+
+    packet = runner._recovery_packet()
+
+    assert set(packet["history"][-1]) == {
+        "action", "kind", "operation", "target", "page_changed", "url", "confidence"
+    }
+    assert set(packet["decisions"][-1]) == {
+        "operation", "target", "confidence", "target_confidence", "fingerprint", "elapsed_ms"
+    }
+    assert "request" not in packet["decisions"][-1]
+    assert "raw_answers" not in packet["decisions"][-1]
 
 
 def test_duplicate_urls_use_target_id_as_handoff_identity(runner):
