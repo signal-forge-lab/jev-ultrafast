@@ -198,14 +198,33 @@ def field_text(context):
     }
 
 
-def recovery_guidance(packet):
-    key = os.environ.get("RECOVERY_MODEL_API_KEY") or os.environ.get("TEXT_MODEL_API_KEY")
+def recovery_model_config():
+    """Resolve one complete recovery provider configuration without mixing providers."""
+    recovery = {
+        "key": os.environ.get("RECOVERY_MODEL_API_KEY"),
+        "base": os.environ.get("RECOVERY_MODEL_BASE_URL"),
+        "model": os.environ.get("RECOVERY_MODEL"),
+    }
+    if any(recovery.values()):
+        if not all(recovery.values()):
+            raise ValueError(
+                "Recovery model configuration is incomplete; set RECOVERY_MODEL_API_KEY, "
+                "RECOVERY_MODEL_BASE_URL, and RECOVERY_MODEL together."
+            )
+        return recovery["key"], recovery["base"], recovery["model"]
+
+    key = os.environ.get("TEXT_MODEL_API_KEY")
     if not key:
-        raise ValueError("Recovery needs RECOVERY_MODEL_API_KEY or TEXT_MODEL_API_KEY; browser automation stopped.")
-    base = os.environ.get("RECOVERY_MODEL_BASE_URL") or os.environ.get(
-        "TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1"
+        raise ValueError("Recovery needs a complete RECOVERY_MODEL_* set or TEXT_MODEL_API_KEY.")
+    return (
+        key,
+        os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1"),
+        os.environ.get("TEXT_MODEL", "deepseek-chat"),
     )
-    model = os.environ.get("RECOVERY_MODEL") or os.environ.get("TEXT_MODEL", "deepseek-chat")
+
+
+def recovery_guidance(packet):
+    key, base, model = recovery_model_config()
     started = time.perf_counter()
     result = post_json(
         base.rstrip("/") + "/chat/completions",
