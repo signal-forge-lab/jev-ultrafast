@@ -595,17 +595,26 @@ def test_e2e_equivalent_second_block_requires_handoff(runner, monkeypatch):
     runner.state["browser"].act.assert_not_called()
 
 
-def test_model_call_budget_enters_blocked_recovery_path_without_mutation(runner, monkeypatch):
+def test_model_call_budget_enters_recovery_path_without_mutation(runner, monkeypatch):
+    runner.recovery_enabled = True
     runner.state["decision"] = None
     runner.state["decisions"] = [{} for _ in range(loop.MAX_STEPS * 2)]
     choose = Mock(side_effect=AssertionError("budget exhaustion must stop before another Jev call"))
+    recovery = Mock(return_value={
+        "diagnosis": "The Jev decision budget is exhausted.",
+        "revised_subgoal": "Retry from the current page with the narrowed goal.",
+        "avoid": [],
+    })
     monkeypatch.setattr(loop, "choose", choose)
+    monkeypatch.setattr(loop, "recovery_guidance", recovery)
 
     result = runner.step()
 
-    assert result["status"] == "blocked"
+    assert result["status"] == "ready"
     assert result["block_reason"] == "model_call_budget"
+    assert result["recovery_attempts"] == 1
     choose.assert_not_called()
+    recovery.assert_called_once()
     runner.state["browser"].act.assert_not_called()
 
 
